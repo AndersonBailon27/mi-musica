@@ -11,14 +11,17 @@ public class Song {
     public final String album;
     public final long albumId;
     public final long duration;
+    /** Carpeta del celular donde está el archivo (ruta completa). */
+    public final String folder;
 
-    public Song(long id, String title, String artist, String album, long albumId, long duration) {
+    public Song(long id, String title, String artist, String album, long albumId, long duration, String folder) {
         this.id = id;
         this.title = title;
         this.artist = artist;
         this.album = album;
         this.albumId = albumId;
         this.duration = duration;
+        this.folder = folder;
     }
 
     public Uri uri() {

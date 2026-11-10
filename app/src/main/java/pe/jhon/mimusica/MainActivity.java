@@ -44,6 +44,7 @@ import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -56,12 +57,19 @@ public class MainActivity extends Activity implements MusicService.Listener {
     private static final int DIALOG_THEME = android.R.style.Theme_Material_Dialog_Alert;
 
     // Pantallas
-    private static final int MODE_SONGS = 0, MODE_FOLDERS = 1, MODE_FOLDER = 2, MODE_HIDDEN = 3;
+    private static final int MODE_SONGS = 0, MODE_FOLDERS = 1, MODE_FOLDER = 2, MODE_HIDDEN = 3, MODE_DEVICE_FOLDER = 4;
     private static final String ROW_NEW_FOLDER = "nueva", ROW_HIDDEN = "ocultas", ROW_ADD_SONGS = "agregar";
 
     /** Letras del índice, en el orden del abecedario español. */
     private static final String[] LETTERS = {"#", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
             "N", "Ñ", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"};
+
+    /** Carpeta real del celular donde hay música. */
+    private static final class DeviceFolder {
+        final String path, name, location;
+        final List<Song> songs = new ArrayList<>();
+        DeviceFolder(String path, String name, String location) { this.path = path; this.name = name; this.location = location; }
+    }
 
     /** Fila separadora con la letra (A, B, C…). */
     private static final class Header {
@@ -88,6 +96,8 @@ public class MainActivity extends Activity implements MusicService.Listener {
     private Library lib;
     private int mode = MODE_SONGS;
     private Library.Folder openFolder;
+    private DeviceFolder openDevice;
+    private final List<DeviceFolder> deviceFolders = new ArrayList<>();
 
     private MusicService svc;
     private boolean bound = false;
@@ -451,7 +461,7 @@ public class MainActivity extends Activity implements MusicService.Listener {
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
-        if (mode == MODE_FOLDER || mode == MODE_HIDDEN) setMode(MODE_FOLDERS);
+        if (mode == MODE_FOLDER || mode == MODE_HIDDEN || mode == MODE_DEVICE_FOLDER) setMode(MODE_FOLDERS);
         else if (mode == MODE_FOLDERS) setMode(MODE_SONGS);
         else super.onBackPressed();
     }
@@ -461,6 +471,7 @@ public class MainActivity extends Activity implements MusicService.Listener {
     private void setMode(int m) {
         mode = m;
         if (m != MODE_FOLDER) openFolder = null;
+        if (m != MODE_DEVICE_FOLDER) openDevice = null;
         search.setText("");
         paintTabs();
         refreshRows();
@@ -468,12 +479,13 @@ public class MainActivity extends Activity implements MusicService.Listener {
     }
 
     private void paintTabs() {
-        boolean detail = mode == MODE_FOLDER || mode == MODE_HIDDEN;
+        boolean detail = mode == MODE_FOLDER || mode == MODE_HIDDEN || mode == MODE_DEVICE_FOLDER;
         tabs.setVisibility(detail ? View.GONE : View.VISIBLE);
         subBar.setVisibility(detail ? View.VISIBLE : View.GONE);
         subMore.setVisibility(mode == MODE_FOLDER ? View.VISIBLE : View.GONE);
         if (mode == MODE_FOLDER && openFolder != null) subTitle.setText(openFolder.name);
         if (mode == MODE_HIDDEN) subTitle.setText("Canciones ocultas");
+        if (mode == MODE_DEVICE_FOLDER && openDevice != null) subTitle.setText(openDevice.name);
         boolean songs = mode == MODE_SONGS;
         tabSongs.setBackground(rounded(songs ? ACC : CARD, 20, 0));
         tabSongs.setTextColor(songs ? 0xFF04130A : TXT);
@@ -515,14 +527,35 @@ public class MainActivity extends Activity implements MusicService.Listener {
                 break;
             }
             case MODE_FOLDERS: {
+                rows.add(new Header("Mis carpetas"));
                 if (q.isEmpty()) rows.add(ROW_NEW_FOLDER);
                 for (Library.Folder f : lib.folders) {
                     if (q.isEmpty() || f.name.toLowerCase(Locale.ROOT).contains(q)) rows.add(f);
                 }
+                boolean deviceHeader = false;
+                int nd = 0;
+                for (DeviceFolder d : deviceFolders) {
+                    if (visibleCount(d) == 0) continue;
+                    nd++;
+                    if (!q.isEmpty() && !(d.name + " " + d.location).toLowerCase(Locale.ROOT).contains(q)) continue;
+                    if (!deviceHeader) { rows.add(new Header("Del celular")); deviceHeader = true; }
+                    rows.add(d);
+                }
                 if (q.isEmpty() && hiddenCount() > 0) rows.add(ROW_HIDDEN);
                 int n = lib.folders.size();
-                countText = n == 1 ? "1 carpeta" : n + " carpetas";
-                if (n == 0) countText = "Crea carpetas para ordenar tu música";
+                countText = (n == 1 ? "1 carpeta tuya" : n + " carpetas tuyas") + "  ·  " + (nd == 1 ? "1 del celular" : nd + " del celular");
+                break;
+            }
+            case MODE_DEVICE_FOLDER: {
+                if (openDevice == null) { setMode(MODE_FOLDERS); return; }
+                int n = 0;
+                for (Song s : openDevice.songs) {
+                    if (lib.hidden.contains(s.id)) continue;
+                    n++;
+                    if (matches(s, q)) { rows.add(s); rowSongs.add(s); }
+                }
+                countText = (n == 1 ? "1 canción" : n + " canciones") + "  ·  " + openDevice.location;
+                if (rows.isEmpty()) emptyMsg = "Ninguna canción coincide con tu búsqueda.";
                 break;
             }
             case MODE_FOLDER: {
@@ -559,6 +592,12 @@ public class MainActivity extends Activity implements MusicService.Listener {
         }
     }
 
+    private int visibleCount(DeviceFolder d) {
+        int n = 0;
+        for (Song s : d.songs) if (!lib.hidden.contains(s.id)) n++;
+        return n;
+    }
+
     private int hiddenCount() {
         int n = 0;
         for (Song s : all) if (lib.hidden.contains(s.id)) n++;
@@ -573,6 +612,13 @@ public class MainActivity extends Activity implements MusicService.Listener {
         } else if (o instanceof Library.Folder) {
             openFolder = (Library.Folder) o;
             mode = MODE_FOLDER;
+            search.setText("");
+            paintTabs();
+            refreshRows();
+            list.setSelection(0);
+        } else if (o instanceof DeviceFolder) {
+            openDevice = (DeviceFolder) o;
+            mode = MODE_DEVICE_FOLDER;
             search.setText("");
             paintTabs();
             refreshRows();
@@ -813,7 +859,12 @@ public class MainActivity extends Activity implements MusicService.Listener {
                         if (t == null || t.trim().isEmpty()) t = "Sin título";
                         if (a == null || a.trim().isEmpty() || a.equals("<unknown>")) a = "Artista desconocido";
                         if (al == null || al.equals("<unknown>")) al = "";
-                        found.add(new Song(id, t.trim(), a.trim(), al, alId, dur));
+                        String folder = "";
+                        if (path != null) {
+                            int slash = path.lastIndexOf('/');
+                            if (slash > 0) folder = path.substring(0, slash);
+                        }
+                        found.add(new Song(id, t.trim(), a.trim(), al, alId, dur, folder));
                     }
                 }
             } catch (Exception ignored) {
@@ -825,7 +876,15 @@ public class MainActivity extends Activity implements MusicService.Listener {
                 if (lx != ly) return lx - ly;
                 return col.compare(x.title, y.title);
             });
+            final List<DeviceFolder> dfs = buildDeviceFolders(found, col);
             handler.post(() -> {
+                deviceFolders.clear();
+                deviceFolders.addAll(dfs);
+                if (openDevice != null) {
+                    DeviceFolder again = null;
+                    for (DeviceFolder d : dfs) if (d.path.equals(openDevice.path)) again = d;
+                    openDevice = again;
+                }
                 all.clear();
                 all.addAll(found);
                 byId.clear();
@@ -835,6 +894,35 @@ public class MainActivity extends Activity implements MusicService.Listener {
                 if (showToast) toast("Biblioteca actualizada");
             });
         }).start();
+    }
+
+    /** Agrupa las canciones según la carpeta del celular donde están guardadas. */
+    private static List<DeviceFolder> buildDeviceFolders(List<Song> songs, Collator col) {
+        Map<String, DeviceFolder> map = new LinkedHashMap<>();
+        for (Song s : songs) {
+            String path = s.folder == null ? "" : s.folder;
+            DeviceFolder d = map.get(path);
+            if (d == null) {
+                String location = path;
+                if (location.startsWith("/storage/emulated/0")) {
+                    location = "Teléfono" + location.substring("/storage/emulated/0".length());
+                } else if (location.startsWith("/storage/")) {
+                    String rest = location.substring("/storage/".length());
+                    int sl = rest.indexOf('/');
+                    location = "Tarjeta SD" + (sl >= 0 ? rest.substring(sl) : "");
+                } else if (location.isEmpty()) {
+                    location = "Otras ubicaciones";
+                }
+                String name = path.isEmpty() ? "Otras" : path.substring(path.lastIndexOf('/') + 1);
+                if (name.isEmpty() || name.equals("0")) name = "Almacenamiento principal";
+                d = new DeviceFolder(path, name, location.replace("/", " › "));
+                map.put(path, d);
+            }
+            d.songs.add(s);
+        }
+        List<DeviceFolder> out = new ArrayList<>(map.values());
+        Collections.sort(out, (a, b) -> col.compare(a.name, b.name));
+        return out;
     }
 
     // ---------------- Reproducción ----------------
@@ -1095,6 +1183,15 @@ public class MainActivity extends Activity implements MusicService.Listener {
                 h.title.setText(f.name);
                 h.title.setTextColor(TXT);
                 h.sub.setText(n == 1 ? "1 canción" : n + " canciones");
+                h.sub.setVisibility(View.VISIBLE);
+            } else if (o instanceof DeviceFolder) {
+                DeviceFolder d = (DeviceFolder) o;
+                int n = visibleCount(d);
+                h.icon.setImageResource(R.drawable.ic_folder);
+                h.icon.setImageTintList(ColorStateList.valueOf(0xFFF5B942));
+                h.title.setText(d.name);
+                h.title.setTextColor(TXT);
+                h.sub.setText((n == 1 ? "1 canción" : n + " canciones") + "  ·  " + d.location);
                 h.sub.setVisibility(View.VISIBLE);
             } else if (ROW_NEW_FOLDER.equals(o)) {
                 h.icon.setImageResource(R.drawable.ic_add);
