@@ -4,6 +4,7 @@ Reproductor de música para Android, sin anuncios. Encuentra solo las canciones 
 
 - Solo muestra música: deja fuera notas de voz, audios de WhatsApp/Telegram, grabaciones y tonos
 - Carpetas propias para ordenar las canciones
+- Ordenada de la A a la Z, con separadores por letra y barra lateral para saltar a cualquier letra
 - Lista con carátulas, buscador, aleatorio y repetir
 - Sigue sonando con la pantalla apagada
 - Controles en la notificación, pantalla de bloqueo y audífonos

@@ -24,6 +24,7 @@ import android.text.InputType;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.BaseAdapter;
@@ -39,6 +40,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.text.Collator;
+import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -56,6 +58,16 @@ public class MainActivity extends Activity implements MusicService.Listener {
     // Pantallas
     private static final int MODE_SONGS = 0, MODE_FOLDERS = 1, MODE_FOLDER = 2, MODE_HIDDEN = 3;
     private static final String ROW_NEW_FOLDER = "nueva", ROW_HIDDEN = "ocultas", ROW_ADD_SONGS = "agregar";
+
+    /** Letras del índice, en el orden del abecedario español. */
+    private static final String[] LETTERS = {"#", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+            "N", "Ñ", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"};
+
+    /** Fila separadora con la letra (A, B, C…). */
+    private static final class Header {
+        final String letter;
+        Header(String letter) { this.letter = letter; }
+    }
 
     /** Carpetas del sistema que guardan audios que NO son música (notas de voz, grabaciones…). */
     private static final String[] NOT_MUSIC = {
@@ -96,6 +108,10 @@ public class MainActivity extends Activity implements MusicService.Listener {
     private ImageView pArt;
     private ImageButton bPlay, bPrev, bNext, bShuf, bRep;
     private SeekBar seek;
+    private LinearLayout alphaStrip;
+    private TextView bubble;
+    private final List<TextView> letterViews = new ArrayList<>();
+    private final Map<String, Integer> headerPos = new HashMap<>();
 
     private final ServiceConnection conn = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -253,7 +269,6 @@ public class MainActivity extends Activity implements MusicService.Listener {
         list.setSelector(new android.graphics.drawable.ColorDrawable(0x22FFFFFF));
         list.setPadding(dp(8), 0, dp(8), dp(8));
         list.setClipToPadding(false);
-        list.setFastScrollEnabled(true);
         adapter = new RowAdapter();
         list.setAdapter(adapter);
         list.setOnItemClickListener((parent, view, position, id) -> onRowClick(position));
@@ -264,6 +279,7 @@ public class MainActivity extends Activity implements MusicService.Listener {
             return false;
         });
         content.addView(list);
+        buildAlphabet(content);
 
         emptyText = text(15, MUT, false);
         emptyText.setSingleLine(false);
@@ -480,10 +496,18 @@ public class MainActivity extends Activity implements MusicService.Listener {
         switch (mode) {
             case MODE_SONGS: {
                 int visible = 0;
+                String lastLetter = null;
                 for (Song s : all) {
                     if (lib.hidden.contains(s.id)) continue;
                     visible++;
-                    if (matches(s, q)) { rows.add(s); rowSongs.add(s); }
+                    if (!matches(s, q)) continue;
+                    String letter = letterOf(s.title);
+                    if (!letter.equals(lastLetter)) {
+                        rows.add(new Header(letter));
+                        lastLetter = letter;
+                    }
+                    rows.add(s);
+                    rowSongs.add(s);
                 }
                 countText = visible == 1 ? "1 canción" : visible + " canciones";
                 if (loaded && visible == 0) emptyMsg = "No se encontró música en tu celular.\n\nAsegúrate de que tus canciones (MP3, M4A…) estén en el teléfono o en la memoria SD y toca el botón de actualizar arriba.";
@@ -526,6 +550,7 @@ public class MainActivity extends Activity implements MusicService.Listener {
         }
         count.setText(countText);
         adapter.notifyDataSetChanged();
+        updateAlphabet(q.isEmpty());
         if (emptyMsg != null) {
             emptyText.setText(emptyMsg);
             emptyText.setVisibility(View.VISIBLE);
@@ -795,7 +820,11 @@ public class MainActivity extends Activity implements MusicService.Listener {
             }
             final Collator col = Collator.getInstance(new Locale("es"));
             col.setStrength(Collator.PRIMARY);
-            Collections.sort(found, (x, y) -> col.compare(x.title, y.title));
+            Collections.sort(found, (x, y) -> {
+                int lx = letterIndex(letterOf(x.title)), ly = letterIndex(letterOf(y.title));
+                if (lx != ly) return lx - ly;
+                return col.compare(x.title, y.title);
+            });
             handler.post(() -> {
                 all.clear();
                 all.addAll(found);
@@ -846,6 +875,109 @@ public class MainActivity extends Activity implements MusicService.Listener {
         adapter.notifyDataSetChanged();
     }
 
+    // ---------------- Índice A–Z ----------------
+
+    /** Letra con la que se agrupa un título: A–Z, Ñ, o # para números y símbolos. */
+    private static String letterOf(String title) {
+        if (title == null) return "#";
+        for (int i = 0; i < title.length(); i++) {
+            char c = title.charAt(i);
+            if (Character.isLetter(c)) {
+                if (c == 'ñ' || c == 'Ñ') return "Ñ";
+                String base = Normalizer.normalize(String.valueOf(c), Normalizer.Form.NFD)
+                        .replaceAll("\\p{M}", "").toUpperCase(Locale.ROOT);
+                if (base.length() == 1 && base.charAt(0) >= 'A' && base.charAt(0) <= 'Z') return base;
+                return "#";
+            }
+            if (Character.isDigit(c)) return "#";
+            // signos al inicio (¿, ¡, comillas, paréntesis…): se saltan
+        }
+        return "#";
+    }
+
+    private static int letterIndex(String letter) {
+        for (int i = 0; i < LETTERS.length; i++) if (LETTERS[i].equals(letter)) return i;
+        return 0;
+    }
+
+    private void buildAlphabet(FrameLayout content) {
+        alphaStrip = new LinearLayout(this);
+        alphaStrip.setOrientation(LinearLayout.VERTICAL);
+        alphaStrip.setGravity(Gravity.CENTER);
+        alphaStrip.setPadding(0, dp(6), 0, dp(6));
+        for (String l : LETTERS) {
+            TextView t = text(11, ACC, true);
+            t.setText(l);
+            t.setGravity(Gravity.CENTER);
+            letterViews.add(t);
+            alphaStrip.addView(t, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        }
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(26), ViewGroup.LayoutParams.MATCH_PARENT);
+        lp.gravity = Gravity.END;
+        content.addView(alphaStrip, lp);
+
+        bubble = text(44, 0xFF04130A, true);
+        bubble.setGravity(Gravity.CENTER);
+        bubble.setBackground(rounded(ACC, 20, 0));
+        bubble.setVisibility(View.GONE);
+        FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(dp(86), dp(86));
+        bp.gravity = Gravity.CENTER;
+        content.addView(bubble, bp);
+
+        alphaStrip.setOnTouchListener((v, ev) -> {
+            int action = ev.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE) {
+                int h = v.getHeight() - v.getPaddingTop() - v.getPaddingBottom();
+                if (h <= 0) return true;
+                float y = ev.getY() - v.getPaddingTop();
+                int idx = (int) (y / h * LETTERS.length);
+                idx = Math.max(0, Math.min(LETTERS.length - 1, idx));
+                jumpTo(idx);
+                return true;
+            }
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                bubble.setVisibility(View.GONE);
+                v.performClick();
+                return true;
+            }
+            return true;
+        });
+    }
+
+    /** Salta a la letra tocada; si no hay canciones con esa letra, va a la siguiente que sí tenga. */
+    private void jumpTo(int idx) {
+        for (int i = idx; i < LETTERS.length; i++) {
+            Integer pos = headerPos.get(LETTERS[i]);
+            if (pos != null) {
+                list.setSelection(pos);
+                break;
+            }
+            if (i == LETTERS.length - 1) {
+                // no hay nada después: ir a la última letra disponible
+                for (int j = idx; j >= 0; j--) {
+                    Integer p2 = headerPos.get(LETTERS[j]);
+                    if (p2 != null) { list.setSelection(p2); break; }
+                }
+            }
+        }
+        bubble.setText(LETTERS[idx]);
+        bubble.setVisibility(View.VISIBLE);
+    }
+
+    private void updateAlphabet(boolean noSearch) {
+        headerPos.clear();
+        for (int i = 0; i < rows.size(); i++) {
+            Object o = rows.get(i);
+            if (o instanceof Header) headerPos.put(((Header) o).letter, i);
+        }
+        boolean show = mode == MODE_SONGS && noSearch && rowSongs.size() > 12;
+        alphaStrip.setVisibility(show ? View.VISIBLE : View.GONE);
+        list.setPadding(dp(8), 0, show ? dp(26) : dp(8), dp(8));
+        for (int i = 0; i < LETTERS.length; i++) {
+            letterViews.get(i).setTextColor(headerPos.containsKey(LETTERS[i]) ? ACC : 0xFF3A3F4B);
+        }
+    }
+
     // ---------------- Lista ----------------
 
     private static class SongHolder {
@@ -863,13 +995,33 @@ public class MainActivity extends Activity implements MusicService.Listener {
         @Override public int getCount() { return rows.size(); }
         @Override public Object getItem(int p) { return rows.get(p); }
         @Override public long getItemId(int p) { return p; }
-        @Override public int getViewTypeCount() { return 2; }
-        @Override public int getItemViewType(int p) { return rows.get(p) instanceof Song ? 0 : 1; }
+        @Override public int getViewTypeCount() { return 3; }
+        @Override public int getItemViewType(int p) {
+            Object o = rows.get(p);
+            return o instanceof Song ? 0 : (o instanceof Header ? 2 : 1);
+        }
+        @Override public boolean areAllItemsEnabled() { return false; }
+        @Override public boolean isEnabled(int p) { return !(rows.get(p) instanceof Header); }
 
         @Override
         public View getView(int position, View convertView, ViewGroup parent) {
             Object o = rows.get(position);
-            return o instanceof Song ? songView((Song) o, convertView) : otherView(o, convertView);
+            if (o instanceof Song) return songView((Song) o, convertView);
+            if (o instanceof Header) return headerView((Header) o, convertView);
+            return otherView(o, convertView);
+        }
+
+        private View headerView(Header hd, View convertView) {
+            TextView t;
+            if (convertView == null) {
+                t = text(17, ACC, true);
+                t.setPadding(dp(12), dp(14), dp(12), dp(4));
+                convertView = t;
+            } else {
+                t = (TextView) convertView;
+            }
+            t.setText(hd.letter);
+            return convertView;
         }
 
         private View songView(Song s, View convertView) {
