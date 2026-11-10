@@ -1,0 +1,45 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'pe.jhon.mimusica'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'pe.jhon.mimusica'
+        minSdk 24
+        targetSdk 34
+        versionCode((System.getenv('GITHUB_RUN_NUMBER') ?: '1').toInteger())
+        versionName "1.0.${System.getenv('GITHUB_RUN_NUMBER') ?: '0'}"
+    }
+
+    signingConfigs {
+        propia {
+            storeFile file('mimusica.jks')
+            storePassword 'mimusica123'
+            keyAlias 'mimusica'
+            keyPassword 'mimusica123'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.propia
+        }
+        debug {
+            signingConfig signingConfigs.propia
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}
