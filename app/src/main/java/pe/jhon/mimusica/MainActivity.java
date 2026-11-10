@@ -2,6 +2,7 @@ package pe.jhon.mimusica;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.ServiceConnection;
@@ -19,6 +20,7 @@ import android.os.Looper;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.Editable;
+import android.text.InputType;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.view.Gravity;
@@ -39,18 +41,41 @@ import android.widget.Toast;
 import java.text.Collator;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 public class MainActivity extends Activity implements MusicService.Listener {
 
     private static final int REQ_PERMISOS = 7;
     private static final int BG = 0xFF0E0F13, CARD = 0xFF171920, CARD2 = 0xFF1F222B,
             TXT = 0xFFF2F3F7, MUT = 0xFF8B90A0, ACC = 0xFF1ED760, LINE = 0xFF262A35;
+    private static final int DIALOG_THEME = android.R.style.Theme_Material_Dialog_Alert;
 
-    private final List<Song> all = new ArrayList<>();
-    private final List<Song> shown = new ArrayList<>();
+    // Pantallas
+    private static final int MODE_SONGS = 0, MODE_FOLDERS = 1, MODE_FOLDER = 2, MODE_HIDDEN = 3;
+    private static final String ROW_NEW_FOLDER = "nueva", ROW_HIDDEN = "ocultas", ROW_ADD_SONGS = "agregar";
+
+    /** Carpetas del sistema que guardan audios que NO son música (notas de voz, grabaciones…). */
+    private static final String[] NOT_MUSIC = {
+            "/whatsapp", "/telegram", "/messenger/", "/signal/", "/android/media/", "/android/data/",
+            "/recordings/", "/recording/", "/recorder/", "/soundrecorder", "/sound recorder",
+            "/voice recorder", "/voice notes", "/voicenotes", "/voice/", "/grabaciones",
+            "/call/", "/callrecord", "/call recordings", "/call_recordings", "/llamadas/",
+            "/notes/", "/ringtones/", "/notifications/", "/alarms/", "/podcasts/", "/audiobooks/",
+            "ptt-", "aud-"
+    };
+
+    private final List<Song> all = new ArrayList<>();          // toda la música encontrada
+    private final Map<Long, Song> byId = new HashMap<>();
+    private final List<Object> rows = new ArrayList<>();        // filas visibles (Song, Folder o String)
+    private final List<Song> rowSongs = new ArrayList<>();      // solo las canciones visibles, en orden
     private final Handler handler = new Handler(Looper.getMainLooper());
+
+    private Library lib;
+    private int mode = MODE_SONGS;
+    private Library.Folder openFolder;
 
     private MusicService svc;
     private boolean bound = false;
@@ -61,11 +86,12 @@ public class MainActivity extends Activity implements MusicService.Listener {
     private int pendingIndex = -1;
     private List<Song> pendingList;
 
-    private SongAdapter adapter;
+    private RowAdapter adapter;
     private EditText search;
-    private TextView count, emptyText, pTitle, pArtist, tCur, tDur, permMsg;
+    private TextView count, emptyText, pTitle, pArtist, tCur, tDur, permMsg, tabSongs, tabFolders, subTitle;
     private ListView list;
-    private LinearLayout player, permPanel;
+    private LinearLayout player, permPanel, tabs, subBar;
+    private ImageButton subMore;
     private Button permBtn;
     private ImageView pArt;
     private ImageButton bPlay, bPrev, bNext, bShuf, bRep;
@@ -102,7 +128,7 @@ public class MainActivity extends Activity implements MusicService.Listener {
         }
     };
 
-    // ---------------- Construcción de la pantalla ----------------
+    // ---------------- Utilidades de interfaz ----------------
 
     private int dp(float v) { return Math.round(v * getResources().getDisplayMetrics().density); }
 
@@ -136,9 +162,25 @@ public class MainActivity extends Activity implements MusicService.Listener {
         return b;
     }
 
+    private TextView tab(String label) {
+        TextView t = text(14, TXT, true);
+        t.setText(label);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(dp(18), dp(8), dp(18), dp(8));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, 0, dp(8), 0);
+        t.setLayoutParams(lp);
+        return t;
+    }
+
+    private void toast(String m) { Toast.makeText(this, m, Toast.LENGTH_SHORT).show(); }
+
+    // ---------------- Pantalla ----------------
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        lib = new Library(this);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -147,22 +189,44 @@ public class MainActivity extends Activity implements MusicService.Listener {
         // Encabezado
         LinearLayout header = new LinearLayout(this);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(dp(18), dp(16), dp(10), dp(6));
+        header.setPadding(dp(18), dp(16), dp(10), dp(4));
         TextView title = text(24, TXT, true);
         title.setText("Mi Música");
         header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         ImageButton refresh = iconButton(R.drawable.ic_refresh, 44, MUT);
-        refresh.setOnClickListener(v -> {
-            if (hasAudioPermission()) {
-                loadSongs(true);
-            }
-        });
+        refresh.setOnClickListener(v -> { if (hasAudioPermission()) loadSongs(true); });
         header.addView(refresh);
         root.addView(header);
 
+        // Pestañas
+        tabs = new LinearLayout(this);
+        tabs.setPadding(dp(16), dp(4), dp(16), dp(6));
+        tabSongs = tab("Canciones");
+        tabFolders = tab("Carpetas");
+        tabs.addView(tabSongs);
+        tabs.addView(tabFolders);
+        tabSongs.setOnClickListener(v -> setMode(MODE_SONGS));
+        tabFolders.setOnClickListener(v -> setMode(MODE_FOLDERS));
+        root.addView(tabs);
+
+        // Barra de carpeta abierta (volver + nombre + opciones)
+        subBar = new LinearLayout(this);
+        subBar.setGravity(Gravity.CENTER_VERTICAL);
+        subBar.setPadding(dp(6), dp(2), dp(6), dp(2));
+        ImageButton back = iconButton(R.drawable.ic_back, 44, TXT);
+        back.setOnClickListener(v -> setMode(MODE_FOLDERS));
+        subBar.addView(back);
+        subTitle = text(18, TXT, true);
+        subBar.addView(subTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        subMore = iconButton(R.drawable.ic_more, 44, MUT);
+        subMore.setOnClickListener(v -> { if (openFolder != null) folderOptions(openFolder); });
+        subBar.addView(subMore);
+        subBar.setVisibility(View.GONE);
+        root.addView(subBar);
+
         // Buscador
         search = new EditText(this);
-        search.setHint("Buscar canción, artista o álbum…");
+        search.setHint("Buscar…");
         search.setHintTextColor(MUT);
         search.setTextColor(TXT);
         search.setTextSize(15);
@@ -175,14 +239,14 @@ public class MainActivity extends Activity implements MusicService.Listener {
         search.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
             @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
-            @Override public void afterTextChanged(Editable e) { filter(); }
+            @Override public void afterTextChanged(Editable e) { refreshRows(); }
         });
 
         count = text(13, MUT, false);
         count.setPadding(dp(18), dp(2), dp(18), dp(6));
         root.addView(count);
 
-        // Contenido: lista / vacío / permiso
+        // Contenido
         FrameLayout content = new FrameLayout(this);
         list = new ListView(this);
         list.setDivider(null);
@@ -190,9 +254,15 @@ public class MainActivity extends Activity implements MusicService.Listener {
         list.setPadding(dp(8), 0, dp(8), dp(8));
         list.setClipToPadding(false);
         list.setFastScrollEnabled(true);
-        adapter = new SongAdapter();
+        adapter = new RowAdapter();
         list.setAdapter(adapter);
-        list.setOnItemClickListener((parent, view, position, id) -> playFrom(position));
+        list.setOnItemClickListener((parent, view, position, id) -> onRowClick(position));
+        list.setOnItemLongClickListener((parent, view, position, id) -> {
+            Object o = rows.get(position);
+            if (o instanceof Song) { songOptions((Song) o); return true; }
+            if (o instanceof Library.Folder) { folderOptions((Library.Folder) o); return true; }
+            return false;
+        });
         content.addView(list);
 
         emptyText = text(15, MUT, false);
@@ -207,6 +277,7 @@ public class MainActivity extends Activity implements MusicService.Listener {
         permPanel.setGravity(Gravity.CENTER);
         permPanel.setPadding(dp(30), dp(30), dp(30), dp(30));
         permPanel.setBackgroundColor(BG);
+        permPanel.setClickable(true);
         ImageView permIcon = new ImageView(this);
         permIcon.setImageResource(R.drawable.ic_note);
         permIcon.setImageTintList(ColorStateList.valueOf(ACC));
@@ -227,9 +298,8 @@ public class MainActivity extends Activity implements MusicService.Listener {
         permBtn.setPadding(dp(28), 0, dp(28), 0);
         permBtn.setOnClickListener(v -> {
             if (deniedForever) {
-                Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        Uri.fromParts("package", getPackageName(), null));
-                startActivity(i);
+                startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", getPackageName(), null)));
             } else {
                 requestPerms();
             }
@@ -240,7 +310,12 @@ public class MainActivity extends Activity implements MusicService.Listener {
 
         root.addView(content, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
-        // Reproductor inferior
+        buildPlayer(root);
+        setContentView(root);
+        paintTabs();
+    }
+
+    private void buildPlayer(LinearLayout root) {
         player = new LinearLayout(this);
         player.setOrientation(LinearLayout.VERTICAL);
         player.setBackgroundColor(CARD);
@@ -311,17 +386,16 @@ public class MainActivity extends Activity implements MusicService.Listener {
         bShuf.setOnClickListener(v -> {
             if (svc == null) return;
             svc.toggleShuffle();
-            Toast.makeText(this, svc.isShuffle() ? "Aleatorio activado" : "Aleatorio desactivado", Toast.LENGTH_SHORT).show();
+            toast(svc.isShuffle() ? "Aleatorio activado" : "Aleatorio desactivado");
         });
         bRep.setOnClickListener(v -> {
             if (svc == null) return;
             svc.cycleRepeat();
             String[] m = {"Repetir desactivado", "Repetir todas", "Repetir una"};
-            Toast.makeText(this, m[svc.getRepeat()], Toast.LENGTH_SHORT).show();
+            toast(m[svc.getRepeat()]);
         });
 
         root.addView(player, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        setContentView(root);
     }
 
     @Override
@@ -356,6 +430,275 @@ public class MainActivity extends Activity implements MusicService.Listener {
         }
         svc = null;
         super.onStop();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onBackPressed() {
+        if (mode == MODE_FOLDER || mode == MODE_HIDDEN) setMode(MODE_FOLDERS);
+        else if (mode == MODE_FOLDERS) setMode(MODE_SONGS);
+        else super.onBackPressed();
+    }
+
+    // ---------------- Navegación ----------------
+
+    private void setMode(int m) {
+        mode = m;
+        if (m != MODE_FOLDER) openFolder = null;
+        search.setText("");
+        paintTabs();
+        refreshRows();
+        list.setSelection(0);
+    }
+
+    private void paintTabs() {
+        boolean detail = mode == MODE_FOLDER || mode == MODE_HIDDEN;
+        tabs.setVisibility(detail ? View.GONE : View.VISIBLE);
+        subBar.setVisibility(detail ? View.VISIBLE : View.GONE);
+        subMore.setVisibility(mode == MODE_FOLDER ? View.VISIBLE : View.GONE);
+        if (mode == MODE_FOLDER && openFolder != null) subTitle.setText(openFolder.name);
+        if (mode == MODE_HIDDEN) subTitle.setText("Canciones ocultas");
+        boolean songs = mode == MODE_SONGS;
+        tabSongs.setBackground(rounded(songs ? ACC : CARD, 20, 0));
+        tabSongs.setTextColor(songs ? 0xFF04130A : TXT);
+        tabFolders.setBackground(rounded(mode == MODE_FOLDERS ? ACC : CARD, 20, 0));
+        tabFolders.setTextColor(mode == MODE_FOLDERS ? 0xFF04130A : TXT);
+        search.setHint(mode == MODE_FOLDERS ? "Buscar carpeta…" : "Buscar canción, artista o álbum…");
+    }
+
+    private boolean matches(Song s, String q) {
+        return q.isEmpty() || (s.title + " " + s.artist + " " + s.album).toLowerCase(Locale.ROOT).contains(q);
+    }
+
+    private void refreshRows() {
+        String q = search.getText().toString().trim().toLowerCase(Locale.ROOT);
+        rows.clear();
+        rowSongs.clear();
+        String countText = "";
+        String emptyMsg = null;
+
+        switch (mode) {
+            case MODE_SONGS: {
+                int visible = 0;
+                for (Song s : all) {
+                    if (lib.hidden.contains(s.id)) continue;
+                    visible++;
+                    if (matches(s, q)) { rows.add(s); rowSongs.add(s); }
+                }
+                countText = visible == 1 ? "1 canción" : visible + " canciones";
+                if (loaded && visible == 0) emptyMsg = "No se encontró música en tu celular.\n\nAsegúrate de que tus canciones (MP3, M4A…) estén en el teléfono o en la memoria SD y toca el botón de actualizar arriba.";
+                else if (loaded && rows.isEmpty()) emptyMsg = "Ninguna canción coincide con tu búsqueda.";
+                break;
+            }
+            case MODE_FOLDERS: {
+                if (q.isEmpty()) rows.add(ROW_NEW_FOLDER);
+                for (Library.Folder f : lib.folders) {
+                    if (q.isEmpty() || f.name.toLowerCase(Locale.ROOT).contains(q)) rows.add(f);
+                }
+                if (q.isEmpty() && hiddenCount() > 0) rows.add(ROW_HIDDEN);
+                int n = lib.folders.size();
+                countText = n == 1 ? "1 carpeta" : n + " carpetas";
+                if (n == 0) countText = "Crea carpetas para ordenar tu música";
+                break;
+            }
+            case MODE_FOLDER: {
+                if (openFolder == null) { setMode(MODE_FOLDERS); return; }
+                if (q.isEmpty()) rows.add(ROW_ADD_SONGS);
+                int n = 0;
+                for (Long id : openFolder.ids) {
+                    Song s = byId.get(id);
+                    if (s == null) continue;
+                    n++;
+                    if (matches(s, q)) { rows.add(s); rowSongs.add(s); }
+                }
+                countText = n == 1 ? "1 canción" : n + " canciones";
+                if (n == 0) countText = "Carpeta vacía: toca \"Agregar canciones\"";
+                break;
+            }
+            case MODE_HIDDEN: {
+                for (Song s : all) {
+                    if (lib.hidden.contains(s.id) && matches(s, q)) { rows.add(s); rowSongs.add(s); }
+                }
+                countText = "Mantén presionada una canción para mostrarla otra vez";
+                if (rows.isEmpty()) emptyMsg = "No hay canciones ocultas.";
+                break;
+            }
+        }
+        count.setText(countText);
+        adapter.notifyDataSetChanged();
+        if (emptyMsg != null) {
+            emptyText.setText(emptyMsg);
+            emptyText.setVisibility(View.VISIBLE);
+        } else {
+            emptyText.setVisibility(View.GONE);
+        }
+    }
+
+    private int hiddenCount() {
+        int n = 0;
+        for (Song s : all) if (lib.hidden.contains(s.id)) n++;
+        return n;
+    }
+
+    private void onRowClick(int position) {
+        if (position < 0 || position >= rows.size()) return;
+        Object o = rows.get(position);
+        if (o instanceof Song) {
+            playFrom(rowSongs.indexOf(o));
+        } else if (o instanceof Library.Folder) {
+            openFolder = (Library.Folder) o;
+            mode = MODE_FOLDER;
+            search.setText("");
+            paintTabs();
+            refreshRows();
+            list.setSelection(0);
+        } else if (ROW_NEW_FOLDER.equals(o)) {
+            askName("Nueva carpeta", "", name -> {
+                lib.create(name);
+                refreshRows();
+                toast("Carpeta \"" + name + "\" creada");
+            });
+        } else if (ROW_HIDDEN.equals(o)) {
+            setMode(MODE_HIDDEN);
+        } else if (ROW_ADD_SONGS.equals(o)) {
+            pickSongsFor(openFolder);
+        }
+    }
+
+    // ---------------- Diálogos ----------------
+
+    private interface NameCallback { void onName(String name); }
+
+    private void askName(String title, String initial, NameCallback cb) {
+        EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        input.setSingleLine(true);
+        input.setText(initial);
+        input.setSelection(initial.length());
+        input.setHint("Ej.: Para entrenar, Cumbia, Favoritas…");
+        FrameLayout box = new FrameLayout(this);
+        box.setPadding(dp(22), dp(8), dp(22), 0);
+        box.addView(input);
+        new AlertDialog.Builder(this, DIALOG_THEME)
+                .setTitle(title)
+                .setView(box)
+                .setPositiveButton("Guardar", (d, w) -> {
+                    String n = input.getText().toString().trim();
+                    if (n.isEmpty()) { toast("Escribe un nombre"); return; }
+                    cb.onName(n);
+                })
+                .setNegativeButton("Cancelar", null)
+                .show();
+    }
+
+    private void songOptions(Song s) {
+        final List<String> labels = new ArrayList<>();
+        final List<Runnable> actions = new ArrayList<>();
+        labels.add("Agregar a carpeta");
+        actions.add(() -> chooseFolderFor(s));
+        if (mode == MODE_FOLDER && openFolder != null) {
+            final Library.Folder f = openFolder;
+            labels.add("Quitar de esta carpeta");
+            actions.add(() -> { lib.remove(f, s.id); refreshRows(); toast("Quitada de \"" + f.name + "\""); });
+        }
+        if (mode == MODE_HIDDEN) {
+            labels.add("Mostrar otra vez en Canciones");
+            actions.add(() -> { lib.unhide(s.id); refreshRows(); toast("\"" + s.title + "\" vuelve a aparecer"); });
+        } else {
+            labels.add("Ocultar (no es música)");
+            actions.add(() -> {
+                lib.hide(s.id);
+                refreshRows();
+                toast("Ocultada. Puedes recuperarla en Carpetas › Canciones ocultas");
+            });
+        }
+        new AlertDialog.Builder(this, DIALOG_THEME)
+                .setTitle(s.title)
+                .setItems(labels.toArray(new String[0]), (d, which) -> actions.get(which).run())
+                .show();
+    }
+
+    private void chooseFolderFor(Song s) {
+        final int n = lib.folders.size();
+        String[] items = new String[n + 1];
+        for (int i = 0; i < n; i++) items[i] = lib.folders.get(i).name;
+        items[n] = "+ Nueva carpeta…";
+        new AlertDialog.Builder(this, DIALOG_THEME)
+                .setTitle("Agregar a carpeta")
+                .setItems(items, (d, which) -> {
+                    if (which == n) {
+                        askName("Nueva carpeta", "", name -> {
+                            Library.Folder f = lib.create(name);
+                            lib.add(f, s.id);
+                            refreshRows();
+                            toast("Agregada a \"" + name + "\"");
+                        });
+                    } else {
+                        Library.Folder f = lib.folders.get(which);
+                        toast(lib.add(f, s.id) ? "Agregada a \"" + f.name + "\"" : "Ya estaba en \"" + f.name + "\"");
+                        refreshRows();
+                    }
+                })
+                .show();
+    }
+
+    private void folderOptions(Library.Folder f) {
+        new AlertDialog.Builder(this, DIALOG_THEME)
+                .setTitle(f.name)
+                .setItems(new String[]{"Agregar canciones", "Cambiar nombre", "Eliminar carpeta"}, (d, which) -> {
+                    if (which == 0) {
+                        pickSongsFor(f);
+                    } else if (which == 1) {
+                        askName("Cambiar nombre", f.name, name -> {
+                            lib.rename(f, name);
+                            paintTabs();
+                            refreshRows();
+                        });
+                    } else {
+                        new AlertDialog.Builder(this, DIALOG_THEME)
+                                .setTitle("¿Eliminar \"" + f.name + "\"?")
+                                .setMessage("Solo se borra la carpeta. Tus canciones siguen en el celular.")
+                                .setPositiveButton("Eliminar", (d2, w2) -> {
+                                    lib.delete(f);
+                                    if (openFolder == f) setMode(MODE_FOLDERS); else refreshRows();
+                                    toast("Carpeta eliminada");
+                                })
+                                .setNegativeButton("Cancelar", null)
+                                .show();
+                    }
+                })
+                .show();
+    }
+
+    /** Permite marcar varias canciones a la vez para meterlas en una carpeta. */
+    private void pickSongsFor(Library.Folder f) {
+        if (f == null) return;
+        final List<Song> choices = new ArrayList<>();
+        for (Song s : all) if (!lib.hidden.contains(s.id)) choices.add(s);
+        if (choices.isEmpty()) { toast("No hay canciones para agregar"); return; }
+        String[] items = new String[choices.size()];
+        boolean[] checked = new boolean[choices.size()];
+        for (int i = 0; i < choices.size(); i++) {
+            Song s = choices.get(i);
+            items[i] = s.title + "  —  " + s.artist;
+            checked[i] = f.ids.contains(s.id);
+        }
+        new AlertDialog.Builder(this, DIALOG_THEME)
+                .setTitle("Agregar a \"" + f.name + "\"")
+                .setMultiChoiceItems(items, checked, (d, which, isChecked) -> checked[which] = isChecked)
+                .setPositiveButton("Listo", (d, w) -> {
+                    int added = 0;
+                    for (int i = 0; i < choices.size(); i++) {
+                        long id = choices.get(i).id;
+                        if (checked[i] && !f.ids.contains(id)) { f.ids.add(id); added++; }
+                        if (!checked[i]) f.ids.remove(Long.valueOf(id));
+                    }
+                    lib.save();
+                    refreshRows();
+                    if (added > 0) toast(added + " canción(es) agregada(s)");
+                })
+                .setNegativeButton("Cancelar", null)
+                .show();
     }
 
     // ---------------- Permisos ----------------
@@ -395,8 +738,26 @@ public class MainActivity extends Activity implements MusicService.Listener {
         }
     }
 
-    // ---------------- Música ----------------
+    // ---------------- Buscar música en el celular ----------------
 
+    private static boolean looksLikeMusic(String path, String mime, String title) {
+        String p = path == null ? "" : path.toLowerCase(Locale.ROOT);
+        String t = title == null ? "" : title.toLowerCase(Locale.ROOT);
+        for (String bad : NOT_MUSIC) {
+            if (bad.startsWith("ptt-") || bad.startsWith("aud-")) {
+                if (t.startsWith(bad)) return false;      // notas de voz de WhatsApp (PTT-..., AUD-...)
+            } else if (p.contains(bad)) {
+                return false;
+            }
+        }
+        if (mime != null) {
+            String m = mime.toLowerCase(Locale.ROOT);
+            if (m.contains("amr") || m.contains("3gpp")) return false; // grabaciones de voz y llamadas
+        }
+        return true;
+    }
+
+    @SuppressWarnings("deprecation")
     private void loadSongs(boolean showToast) {
         new Thread(() -> {
             final List<Song> found = new ArrayList<>();
@@ -406,7 +767,9 @@ public class MainActivity extends Activity implements MusicService.Listener {
                     MediaStore.Audio.Media.ARTIST,
                     MediaStore.Audio.Media.ALBUM,
                     MediaStore.Audio.Media.ALBUM_ID,
-                    MediaStore.Audio.Media.DURATION
+                    MediaStore.Audio.Media.DURATION,
+                    MediaStore.Audio.Media.DATA,
+                    MediaStore.Audio.Media.MIME_TYPE
             };
             String sel = MediaStore.Audio.Media.IS_MUSIC + " != 0";
             try (Cursor c = getContentResolver().query(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, proj, sel, null, null)) {
@@ -418,7 +781,10 @@ public class MainActivity extends Activity implements MusicService.Listener {
                         String al = c.getString(3);
                         long alId = c.getLong(4);
                         long dur = c.getLong(5);
-                        if (dur > 0 && dur < 10000) continue; // ignora sonidos muy cortos
+                        String path = c.getString(6);
+                        String mime = c.getString(7);
+                        if (dur > 0 && dur < 30000) continue;          // menos de 30 s: no es una canción
+                        if (!looksLikeMusic(path, mime, t)) continue;  // notas de voz, grabaciones, etc.
                         if (t == null || t.trim().isEmpty()) t = "Sin título";
                         if (a == null || a.trim().isEmpty() || a.equals("<unknown>")) a = "Artista desconocido";
                         if (al == null || al.equals("<unknown>")) al = "";
@@ -433,50 +799,31 @@ public class MainActivity extends Activity implements MusicService.Listener {
             handler.post(() -> {
                 all.clear();
                 all.addAll(found);
+                byId.clear();
+                for (Song s : found) byId.put(s.id, s);
                 loaded = true;
-                filter();
-                if (showToast) Toast.makeText(this, "Biblioteca actualizada", Toast.LENGTH_SHORT).show();
+                refreshRows();
+                if (showToast) toast("Biblioteca actualizada");
             });
         }).start();
     }
 
-    private void filter() {
-        String q = search.getText().toString().trim().toLowerCase(Locale.ROOT);
-        shown.clear();
-        for (Song s : all) {
-            if (q.isEmpty() || (s.title + " " + s.artist + " " + s.album).toLowerCase(Locale.ROOT).contains(q)) shown.add(s);
-        }
-        adapter.notifyDataSetChanged();
-        int n = all.size();
-        count.setText(n == 1 ? "1 canción" : n + " canciones");
-        if (loaded && all.isEmpty()) {
-            emptyText.setText("No se encontraron canciones en tu celular.\n\nAsegúrate de que tus archivos de música (MP3, M4A…) estén en el teléfono o en la memoria SD y toca el botón de actualizar arriba.");
-            emptyText.setVisibility(View.VISIBLE);
-        } else if (loaded && shown.isEmpty()) {
-            emptyText.setText("Ninguna canción coincide con tu búsqueda.");
-            emptyText.setVisibility(View.VISIBLE);
-        } else {
-            emptyText.setVisibility(View.GONE);
-        }
-    }
+    // ---------------- Reproducción ----------------
 
-    private void playFrom(int position) {
-        if (position < 0 || position >= shown.size()) return;
-        Intent i = new Intent(this, MusicService.class);
-        startService(i);
-        List<Song> copy = new ArrayList<>(shown);
+    private void playFrom(int index) {
+        if (index < 0 || index >= rowSongs.size()) return;
+        startService(new Intent(this, MusicService.class));
+        List<Song> copy = new ArrayList<>(rowSongs);
         if (svc != null) {
-            svc.playList(copy, position);
+            svc.playList(copy, index);
         } else {
             pendingList = copy;
-            pendingIndex = position;
+            pendingIndex = index;
         }
     }
 
     @Override
-    public void onPlayerChanged() {
-        updatePlayer();
-    }
+    public void onPlayerChanged() { updatePlayer(); }
 
     private void updatePlayer() {
         if (svc == null) return;
@@ -501,24 +848,37 @@ public class MainActivity extends Activity implements MusicService.Listener {
 
     // ---------------- Lista ----------------
 
-    private static class Holder {
+    private static class SongHolder {
         ImageView art;
+        TextView title, sub;
+        ImageButton more;
+    }
+
+    private static class RowHolder {
+        ImageView icon;
         TextView title, sub;
     }
 
-    private class SongAdapter extends BaseAdapter {
-        @Override public int getCount() { return shown.size(); }
-        @Override public Object getItem(int p) { return shown.get(p); }
-        @Override public long getItemId(int p) { return shown.get(p).id; }
+    private class RowAdapter extends BaseAdapter {
+        @Override public int getCount() { return rows.size(); }
+        @Override public Object getItem(int p) { return rows.get(p); }
+        @Override public long getItemId(int p) { return p; }
+        @Override public int getViewTypeCount() { return 2; }
+        @Override public int getItemViewType(int p) { return rows.get(p) instanceof Song ? 0 : 1; }
 
         @Override
         public View getView(int position, View convertView, ViewGroup parent) {
-            Holder h;
+            Object o = rows.get(position);
+            return o instanceof Song ? songView((Song) o, convertView) : otherView(o, convertView);
+        }
+
+        private View songView(Song s, View convertView) {
+            SongHolder h;
             if (convertView == null) {
                 LinearLayout row = new LinearLayout(MainActivity.this);
                 row.setGravity(Gravity.CENTER_VERTICAL);
-                row.setPadding(dp(10), dp(8), dp(10), dp(8));
-                h = new Holder();
+                row.setPadding(dp(10), dp(8), dp(2), dp(8));
+                h = new SongHolder();
                 h.art = new ImageView(MainActivity.this);
                 h.art.setBackground(rounded(CARD2, 8, 0));
                 h.art.setClipToOutline(true);
@@ -531,19 +891,80 @@ public class MainActivity extends Activity implements MusicService.Listener {
                 txt.addView(h.title);
                 txt.addView(h.sub);
                 row.addView(txt, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                h.more = iconButton(R.drawable.ic_more, 40, MUT);
+                h.more.setFocusable(false);
+                row.addView(h.more);
                 row.setTag(h);
                 convertView = row;
             } else {
-                h = (Holder) convertView.getTag();
+                h = (SongHolder) convertView.getTag();
             }
-            Song s = shown.get(position);
             Song cur = svc != null ? svc.getCurrentSong() : null;
             boolean on = cur != null && cur.id == s.id;
             h.title.setText(s.title);
             h.title.setTextColor(on ? ACC : TXT);
             h.sub.setText(s.artist + "  ·  " + Song.fmt(s.duration));
+            h.more.setOnClickListener(v -> songOptions(s));
             convertView.setBackground(on ? rounded(CARD2, 12, 0) : null);
             ArtLoader.into(MainActivity.this, s, h.art);
+            return convertView;
+        }
+
+        private View otherView(Object o, View convertView) {
+            RowHolder h;
+            if (convertView == null) {
+                LinearLayout row = new LinearLayout(MainActivity.this);
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setPadding(dp(10), dp(8), dp(10), dp(8));
+                h = new RowHolder();
+                h.icon = new ImageView(MainActivity.this);
+                h.icon.setBackground(rounded(CARD2, 8, 0));
+                h.icon.setPadding(dp(12), dp(12), dp(12), dp(12));
+                row.addView(h.icon, new LinearLayout.LayoutParams(dp(48), dp(48)));
+                LinearLayout txt = new LinearLayout(MainActivity.this);
+                txt.setOrientation(LinearLayout.VERTICAL);
+                txt.setPadding(dp(12), 0, 0, 0);
+                h.title = text(15, TXT, true);
+                h.sub = text(13, MUT, false);
+                txt.addView(h.title);
+                txt.addView(h.sub);
+                row.addView(txt, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                row.setTag(h);
+                convertView = row;
+            } else {
+                h = (RowHolder) convertView.getTag();
+            }
+            if (o instanceof Library.Folder) {
+                Library.Folder f = (Library.Folder) o;
+                int n = 0;
+                for (Long id : f.ids) if (byId.containsKey(id)) n++;
+                h.icon.setImageResource(R.drawable.ic_folder);
+                h.icon.setImageTintList(ColorStateList.valueOf(ACC));
+                h.title.setText(f.name);
+                h.title.setTextColor(TXT);
+                h.sub.setText(n == 1 ? "1 canción" : n + " canciones");
+                h.sub.setVisibility(View.VISIBLE);
+            } else if (ROW_NEW_FOLDER.equals(o)) {
+                h.icon.setImageResource(R.drawable.ic_add);
+                h.icon.setImageTintList(ColorStateList.valueOf(ACC));
+                h.title.setText("Nueva carpeta");
+                h.title.setTextColor(ACC);
+                h.sub.setVisibility(View.GONE);
+            } else if (ROW_ADD_SONGS.equals(o)) {
+                h.icon.setImageResource(R.drawable.ic_add);
+                h.icon.setImageTintList(ColorStateList.valueOf(ACC));
+                h.title.setText("Agregar canciones");
+                h.title.setTextColor(ACC);
+                h.sub.setVisibility(View.GONE);
+            } else if (ROW_HIDDEN.equals(o)) {
+                int n = hiddenCount();
+                h.icon.setImageResource(R.drawable.ic_hidden);
+                h.icon.setImageTintList(ColorStateList.valueOf(MUT));
+                h.title.setText("Canciones ocultas");
+                h.title.setTextColor(MUT);
+                h.sub.setText(n == 1 ? "1 oculta" : n + " ocultas");
+                h.sub.setVisibility(View.VISIBLE);
+            }
             return convertView;
         }
     }
