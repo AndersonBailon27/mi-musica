@@ -78,6 +78,7 @@ public class MusicService extends Service implements
     private final BroadcastReceiver noisy = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             // Se desconectaron los audífonos: pausar
+            Toast.makeText(MusicService.this, "Pausado: se desconectaron los audífonos", Toast.LENGTH_SHORT).show();
             pause();
         }
     };
@@ -87,6 +88,7 @@ public class MusicService extends Service implements
     @Override
     public void onCreate() {
         super.onCreate();
+        CrashLog.install(this);
         am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         prefs = getSharedPreferences("ajustes", MODE_PRIVATE);
@@ -226,6 +228,7 @@ public class MusicService extends Service implements
         }
         if (pos >= order.size() - 1) {
             if (auto && repeat == 0) {
+                Toast.makeText(this, "Terminó la lista. Activa \"Repetir\" para que siga sonando.", Toast.LENGTH_LONG).show();
                 pauseInternal();
                 if (prepared) mp.seekTo(0);
                 updateState();
@@ -316,7 +319,9 @@ public class MusicService extends Service implements
         changed();
 
         new Thread(() -> {
-            final Bitmap b = ArtLoader.loadSync(getApplicationContext(), s);
+            Bitmap big = null;
+            try { big = ArtLoader.loadSync(getApplicationContext(), s); } catch (Throwable ignored) {}
+            final Bitmap b = ArtLoader.shrink(big, 256);
             main.post(() -> {
                 if (getCurrentSong() == s) {
                     currentArt = b;
@@ -415,6 +420,7 @@ public class MusicService extends Service implements
     public void onAudioFocusChange(int change) {
         switch (change) {
             case AudioManager.AUDIOFOCUS_LOSS:
+                if (isPlaying()) Toast.makeText(this, "Pausado: otra app empezó a usar el audio", Toast.LENGTH_LONG).show();
                 pause();
                 break;
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
@@ -458,13 +464,13 @@ public class MusicService extends Service implements
         else if (isPlaying()) st = PlaybackState.STATE_PLAYING;
         else if (playWhenReady && !prepared) st = PlaybackState.STATE_BUFFERING;
         else st = PlaybackState.STATE_PAUSED;
-        session.setPlaybackState(new PlaybackState.Builder()
+        try { session.setPlaybackState(new PlaybackState.Builder()
                 .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE
                         | PlaybackState.ACTION_PLAY_PAUSE | PlaybackState.ACTION_SKIP_TO_NEXT
                         | PlaybackState.ACTION_SKIP_TO_PREVIOUS | PlaybackState.ACTION_SEEK_TO
                         | PlaybackState.ACTION_STOP)
                 .setState(st, getPosition(), st == PlaybackState.STATE_PLAYING ? 1f : 0f)
-                .build());
+                .build()); } catch (Throwable ignored) {}
     }
 
     private void updateMetadata(Song s) {
@@ -474,7 +480,12 @@ public class MusicService extends Service implements
                 .putString(MediaMetadata.METADATA_KEY_ALBUM, s.album)
                 .putLong(MediaMetadata.METADATA_KEY_DURATION, s.duration);
         if (currentArt != null) b.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, currentArt);
-        session.setMetadata(b.build());
+        try {
+            session.setMetadata(b.build());
+        } catch (Throwable e) {
+            // si la carátula no entra, se manda sin carátula
+            try { b.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, null); session.setMetadata(b.build()); } catch (Throwable ignored) {}
+        }
     }
 
     private PendingIntent contentIntent() {
@@ -514,7 +525,13 @@ public class MusicService extends Service implements
         b.setStyle(new Notification.MediaStyle()
                 .setMediaSession(session.getSessionToken())
                 .setShowActionsInCompactView(0, 1, 2));
-        Notification n = b.build();
+        Notification n;
+        try {
+            n = b.build();
+        } catch (Throwable e) {
+            b.setLargeIcon((Bitmap) null);
+            n = b.build();
+        }
 
         if (playing) {
             try {
@@ -524,15 +541,15 @@ public class MusicService extends Service implements
                     startForeground(NOTIF_ID, n);
                 }
                 foreground = true;
-            } catch (Exception e) {
-                nm.notify(NOTIF_ID, n);
+            } catch (Throwable e) {
+                try { nm.notify(NOTIF_ID, n); } catch (Throwable ignored) {}
             }
         } else {
             if (foreground) {
                 stopForeground(STOP_FOREGROUND_DETACH);
                 foreground = false;
             }
-            nm.notify(NOTIF_ID, n);
+            try { nm.notify(NOTIF_ID, n); } catch (Throwable ignored) {}
         }
     }
 

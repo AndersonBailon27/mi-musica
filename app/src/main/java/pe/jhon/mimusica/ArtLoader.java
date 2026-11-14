@@ -72,8 +72,22 @@ public final class ArtLoader {
                 try { mmr.release(); } catch (Throwable ignored) {}
             }
         }
+        if (b != null) b = shrink(b, 320);
         if (b == null) missing.add(s.id); else cache.put(s.id, b);
         return b;
+    }
+
+    /** Reduce la imagen para que nunca sea más grande de lo necesario (evita cierres de la app). */
+    public static Bitmap shrink(Bitmap b, int max) {
+        if (b == null) return null;
+        int w = b.getWidth(), h = b.getHeight();
+        if (w <= max && h <= max) return b;
+        float k = Math.min((float) max / w, (float) max / h);
+        try {
+            return Bitmap.createScaledBitmap(b, Math.max(1, Math.round(w * k)), Math.max(1, Math.round(h * k)), true);
+        } catch (Throwable e) {
+            return null;
+        }
     }
 
     public static void into(Context c, Song s, ImageView iv) {

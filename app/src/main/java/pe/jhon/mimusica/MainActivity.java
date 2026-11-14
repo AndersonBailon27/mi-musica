@@ -206,6 +206,7 @@ public class MainActivity extends Activity implements MusicService.Listener {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        CrashLog.install(this);
         lib = new Library(this);
 
         LinearLayout root = new LinearLayout(this);
@@ -339,6 +340,7 @@ public class MainActivity extends Activity implements MusicService.Listener {
         buildPlayer(root);
         setContentView(root);
         paintTabs();
+        showLastCrash();
     }
 
     private void buildPlayer(LinearLayout root) {
@@ -464,6 +466,48 @@ public class MainActivity extends Activity implements MusicService.Listener {
         if (mode == MODE_FOLDER || mode == MODE_HIDDEN || mode == MODE_DEVICE_FOLDER) setMode(MODE_FOLDERS);
         else if (mode == MODE_FOLDERS) setMode(MODE_SONGS);
         else super.onBackPressed();
+    }
+
+    /** Si la app se cerró sola la última vez, muestra el error para poder enviarlo. */
+    private void showLastCrash() {
+        final String err = CrashLog.takeLast(this);
+        if (err == null) return;
+        new AlertDialog.Builder(this, DIALOG_THEME)
+                .setTitle("La app se cerró por un error")
+                .setMessage("Copia este informe y envíalo para corregirlo:\n\n" + (err.length() > 1500 ? err.substring(0, 1500) + "…" : err))
+                .setPositiveButton("Copiar informe", (d, w) -> {
+                    try {
+                        android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("error Mi Música", err));
+                        toast("Informe copiado");
+                    } catch (Exception ignored) {}
+                })
+                .setNegativeButton("Cerrar", null)
+                .show();
+    }
+
+    /** Xiaomi y otras marcas cortan la música con la pantalla apagada si no se quita el ahorro de batería. */
+    private void maybeAskBattery() {
+        if (Build.VERSION.SDK_INT < 23) return;
+        android.content.SharedPreferences p = getSharedPreferences("ajustes", MODE_PRIVATE);
+        if (p.getBoolean("bateria_preguntado", false)) return;
+        android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+        if (pm == null || pm.isIgnoringBatteryOptimizations(getPackageName())) return;
+        p.edit().putBoolean("bateria_preguntado", true).apply();
+        new AlertDialog.Builder(this, DIALOG_THEME)
+                .setTitle("Para que la música no se corte")
+                .setMessage("Tu celular puede detener la música con la pantalla apagada para ahorrar batería. Toca \"Permitir\" y acepta para que Mi Música pueda seguir sonando.")
+                .setPositiveButton("Permitir", (d, w) -> {
+                    try {
+                        Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:" + getPackageName()));
+                        startActivity(i);
+                    } catch (Exception e) {
+                        try { startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)); } catch (Exception ignored) {}
+                    }
+                })
+                .setNegativeButton("Ahora no", null)
+                .show();
     }
 
     // ---------------- Navegación ----------------
@@ -930,6 +974,7 @@ public class MainActivity extends Activity implements MusicService.Listener {
     private void playFrom(int index) {
         if (index < 0 || index >= rowSongs.size()) return;
         startService(new Intent(this, MusicService.class));
+        maybeAskBattery();
         List<Song> copy = new ArrayList<>(rowSongs);
         if (svc != null) {
             svc.playList(copy, index);
