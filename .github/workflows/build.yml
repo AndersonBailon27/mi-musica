@@ -39,6 +39,6 @@ jobs:
         with:
           tag_name: v1.0.${{ github.run_number }}
           name: Mi Música v1.0.${{ github.run_number }}
-          body: Descarga **MiMusica.apk** desde el celular e instálala.
+          body: ${{ github.event.head_commit.message }}
           files: MiMusica.apk
           make_latest: true

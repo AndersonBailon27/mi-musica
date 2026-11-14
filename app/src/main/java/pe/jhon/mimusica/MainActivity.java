@@ -94,6 +94,7 @@ public class MainActivity extends Activity implements MusicService.Listener {
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private Library lib;
+    private Updater updater;
     private int mode = MODE_SONGS;
     private Library.Folder openFolder;
     private DeviceFolder openDevice;
@@ -208,6 +209,7 @@ public class MainActivity extends Activity implements MusicService.Listener {
         super.onCreate(savedInstanceState);
         CrashLog.install(this);
         lib = new Library(this);
+        updater = new Updater(this);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -223,6 +225,15 @@ public class MainActivity extends Activity implements MusicService.Listener {
         ImageButton refresh = iconButton(R.drawable.ic_refresh, 44, MUT);
         refresh.setOnClickListener(v -> { if (hasAudioPermission()) loadSongs(true); });
         header.addView(refresh);
+        ImageButton menu = iconButton(R.drawable.ic_more, 44, MUT);
+        menu.setOnClickListener(v -> new AlertDialog.Builder(this, DIALOG_THEME)
+                .setTitle("Mi Música " + Updater.installedName(this))
+                .setItems(new String[]{"Buscar actualizaciones", "Actualizar biblioteca"}, (d, which) -> {
+                    if (which == 0) updater.checkNow();
+                    else if (hasAudioPermission()) loadSongs(true);
+                })
+                .show());
+        header.addView(menu);
         root.addView(header);
 
         // Pestañas
@@ -439,6 +450,7 @@ public class MainActivity extends Activity implements MusicService.Listener {
         if (hasAudioPermission()) {
             permPanel.setVisibility(View.GONE);
             if (!loaded) loadSongs(false);
+            updater.checkQuietly();
         } else {
             permPanel.setVisibility(View.VISIBLE);
             if (!askedOnce) {
@@ -446,6 +458,12 @@ public class MainActivity extends Activity implements MusicService.Listener {
                 requestPerms();
             }
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (updater != null) updater.stop();
+        super.onDestroy();
     }
 
     @Override
